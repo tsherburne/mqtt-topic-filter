@@ -1,7 +1,7 @@
 #include <net/sock.h>
 #include <bcc/proto.h>
 
-#define IP_TCP 	6
+#define IP_TCP  6
 #define ETH_HLEN 14
 #define MAX_TOPIC_LEN 255
 
@@ -13,26 +13,26 @@ struct Key {
 BPF_HASH(allowed_topics, struct Key, bool, 256);
 
 int mqtt_filter(struct __sk_buff *skb) {
-	u8 *cursor = 0;
-	struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
+    u8 *cursor = 0;
+    struct ethernet_t *ethernet = cursor_advance(cursor, sizeof(*ethernet));
     // filter IPv4 (0x0800 ethertype) 
-	if (ethernet->type == 0x0800) {
- 	    struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
-	    // filter TCP packets (0x06 ipv4)
-	    if (ip->nextp == IP_TCP) {
-           	u32  ip_header_length = 0;
+    if (ethernet->type == 0x0800) {
+        struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
+        // filter TCP packets (0x06 ipv4)
+        if (ip->nextp == IP_TCP) {
+            u32  ip_header_length = 0;
             ip_header_length = ip->hlen << 2;
             // shift cursor forward for dynamic ip header size
-	        void *_ = cursor_advance(cursor, (ip_header_length-sizeof(*ip)));
-          	struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
+            void *_ = cursor_advance(cursor, (ip_header_length-sizeof(*ip)));
+            struct tcp_t *tcp = cursor_advance(cursor, sizeof(*tcp));
             // filter mqtt packets
             if (tcp->dst_port == 1883) {
                 u32  tcp_header_length = 0;
-               	tcp_header_length = tcp->offset << 2;
+                tcp_header_length = tcp->offset << 2;
 
                 //calculate payload offset and length
                 u32  payload_offset = 0;
-	            u32  payload_length = 0;
+                u32  payload_length = 0;
                 payload_offset = ETH_HLEN + ip_header_length + tcp_header_length;
                 payload_length = ip->tlen - ip_header_length - tcp_header_length;
 
@@ -93,7 +93,7 @@ int mqtt_filter(struct __sk_buff *skb) {
                 }
             }
         }
-	}   
+    }   
     // drop the packet
     return -1;
 }
