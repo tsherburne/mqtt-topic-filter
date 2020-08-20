@@ -1,26 +1,23 @@
 #!/usr/bin/python
 from bcc import BPF
-import socket
-import os
 import binascii
-import time
+import socket
+import struct
+import ipaddress
 
 # initialize BPF - load source code
 bpf = BPF(src_file="mqtt-topic-filter.c")
 # load eBPF function of type SOCKET_FILTER into the kernel
 mqtt_filter_function = bpf.load_func("mqtt_filter", BPF.SOCKET_FILTER)
-# creat a RAW socket and attach eBPF function
+# create a RAW socket and attach eBPF function
 BPF.attach_raw_socket(mqtt_filter_function, "eth0")
-# get the socket fd
-socket_fd = mqtt_filter_function.sock
-# create a Python socket object
-sock = socket.fromfd(socket_fd, socket.PF_PACKET, 
-                     socket.SOCK_RAW, socket.IPPROTO_IP)
-# set as blocking
-sock.setblocking(True)
-# get reference to bpf allowed topics hash
+
 allowed_topics = bpf.get_table("allowed_topics")
 
+allowed_topics[allowed_topics.Key(int(ipaddress.IPv4Address('192.168.7.65')), b'/my/topic')] = allowed_topics.Leaf(True, False, 10)
+
 while 1:
-    # arg 5 is Message 
-    bpf.trace_print(fmt="{5}")
+    (task, pid, cpu, flags, ts, msg) = bpf.trace_fields()
+    print(msg)
+    for key, value in allowed_topics.items():
+        print(str(ipaddress.IPv4Address(key.src_ip)), key.topic, value.allow_sub, value.allow_pub, value.rate)

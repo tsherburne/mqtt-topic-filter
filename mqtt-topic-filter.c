@@ -6,11 +6,16 @@
 #define MAX_TOPIC_LEN 255
 
 struct Key {
-    u32   ip;
+    u32   src_ip;
     char  topic[MAX_TOPIC_LEN + 1];
 };
+struct Leaf {
+    int   allow_sub;
+    int   allow_pub;
+    int   rate;
+};
 // allowed ip / topic pairs
-BPF_HASH(allowed_topics, struct Key, bool, 256);
+BPF_HASH(allowed_topics, struct Key, struct Leaf, 256);
 
 int mqtt_filter(struct __sk_buff *skb) {
     u8 *cursor = 0;
@@ -72,19 +77,33 @@ int mqtt_filter(struct __sk_buff *skb) {
                     mqtt_topic_len = (mqtt_topic_len_msb << 8) + mqtt_topic_len_lsb;
                     mqtt_payload_len = mqtt_packet_length - 1 - mqtt_length_size - mqtt_topic_len;
 
-                    char mqtt_topic[MAX_TOPIC_LEN + 1];
+                    // initialized lookup key
+                    struct Key key;
+                    __builtin_memset(&key, 0, sizeof(key));
+                    key.src_ip = ip->src;
+                    //char mqtt_topic[MAX_TOPIC_LEN + 1];
                     if (mqtt_topic_len > 0 && mqtt_topic_len <= MAX_TOPIC_LEN) {
                         // fetch topic
                         u16 i = 0;
                         for (i = 0; i < MAX_TOPIC_LEN; i++) {
-                            mqtt_topic[i] = load_byte(skb, payload_index + i);
+                            key.topic[i] = load_byte(skb, payload_index + i);
                             if (i >= mqtt_topic_len) {
                                 break;
                             }
                         }
                         // null terminate 
-                        mqtt_topic[i] = '\0';
-                        bpf_trace_printk("MQTT: %d: %s : %d\n", mqtt_topic_len, mqtt_topic, mqtt_payload_len);
+                        key.topic[i] = '\0';
+                        bpf_trace_printk("MQTT: %u: %s : %d\n", key.src_ip, key.topic, mqtt_payload_len);
+
+                        // check if publish is allowed
+                        struct Leaf *leaf;
+                        leaf = allowed_topics.lookup(&key);
+                        if (leaf != NULL) {
+                            bpf_trace_printk("Key found\n");
+                        }
+                        else {
+                            bpf_trace_printk("Key not found\n");
+                        }          
                     }
                     else
                     {
