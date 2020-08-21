@@ -1,0 +1,22 @@
+{
+  "data": {
+    "topicFilters": [
+      {
+        "id": "6e46f142-e30b-11ea-9efd-cbb601d60c0d",
+        "srcIP": "192.168.7.65",
+        "topic": "/my/topic-1",
+        "allowSub": true,
+        "allowPub": true,
+        "pubRate": 10
+      },
+      {
+        "id": "b96c9a3c-e30b-11ea-9efd-cbb601d60c0d",
+        "srcIP": "192.168.7.65",
+        "topic": "/my/topic-2",
+        "allowSub": true,
+        "allowPub": false,
+        "pubRate": 10
+      }
+    ]
+  }
+}

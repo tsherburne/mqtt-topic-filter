@@ -1,0 +1,57 @@
+schema {
+  query: Query
+  mutation: Mutation
+}
+type Query {
+  """
+  List of Topic Filters
+  """
+  mqttTopicFilterQuery: MqttTopicFilterResponse
+}
+type MqttTopicFilterResponse {
+  status: ResponseStatus
+  topicFilters: [TopicFilter]
+}
+type ResponseStatus {
+  code: ResponseCode
+  message: String
+}
+enum ResponseCode
+{
+  Success
+  FailureNotFound
+  FailureNotUnique
+  FailureGeneral
+}
+enum MutationOperation
+{
+  Create
+  Update
+  Delete
+}
+type TopicFilter {
+  """
+  Unique ID generated for filter
+  """
+  id: ID!
+  """
+  The source IP address of the MQTT subsribe or publish
+  """
+  srcIP: String!
+  """
+  The topic of the MQTT subscribe or publish
+  """
+  topic: String!
+  """
+  Is the srcIp allowed to subscribe to this topic?
+  """
+  allowSub: Boolean!
+  """
+  Is the srcIP allowed to publish to this topic?
+  """
+  allowPub: Boolean!
+  """
+  Maximum publication rate (messages per second) for the srcIp to this topic
+  """
+  pubRate: Int!
+}
