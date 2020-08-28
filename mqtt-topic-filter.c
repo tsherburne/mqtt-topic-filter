@@ -115,9 +115,6 @@ int mqtt_filter(struct __sk_buff *skb) {
                     break;
                 }
             }
-            // null terminate 
-            key.topic[i] = '\0';
-            bpf_trace_printk("MQTT: %u: %s : %d\n", key.src_ip, key.topic, mqtt_payload_len);
 
             // check if publish is allowed
             struct Leaf *leaf;
@@ -131,7 +128,6 @@ int mqtt_filter(struct __sk_buff *skb) {
                 exception.mqtt_type = MQTT_PUB;
                 __builtin_memcpy(&exception.topic, key.topic, sizeof(exception.topic));
                 exceptions.perf_submit(skb, &exception, sizeof(exception));
-                //bpf_trace_printk("FOUND: %d : %d\n", leaf->allow_sub, leaf->allow_pub);
             }
         }
         else
