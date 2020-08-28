@@ -23,7 +23,7 @@ BPF_HASH(allowed_topics, struct Key, struct Leaf, 256);
 struct Exception {
     u64     ts;
     u32     src_ip;
-    char    mqtt_type;
+    u32     mqtt_type;
     char    topic[MAX_TOPIC_LEN + 1];
 };
 // mqtt topic exceptions

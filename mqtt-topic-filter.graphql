@@ -92,6 +92,7 @@ type PolicyException {
   mqttType: MQTTType!
 }
 enum MQTTType {
+  None
   Publish
   Subscribe
 }
