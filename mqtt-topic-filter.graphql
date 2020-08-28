@@ -3,17 +3,28 @@ schema {
   subscription: Subscription
 }
 type Subscription {
-  policyException: String
+  """
+  A Policy Exception notification
+  """
+  policyException: PolicyException
 }
 type Query {
   """
   List of Topic Filters
   """
   mqttTopicFilterQuery: MqttTopicFilterResponse
+  """
+  List of Policy Exceptions
+  """
+  mqttPolicyExceptionQuery: MqttPolicyExceptionResponse
 }
 type MqttTopicFilterResponse {
   status: ResponseStatus
   topicFilters: [TopicFilter]
+}
+type MqttPolicyExceptionResponse {
+  status: ResponseStatus
+  policyExceptions: [PolicyException]
 }
 type ResponseStatus {
   code: ResponseCode
@@ -57,4 +68,30 @@ type TopicFilter {
   Maximum publication rate (messages per second) for the srcIp to this topic
   """
   pubRate: Int!
+}
+type PolicyException {
+  """
+  Unique ID generted for exception
+  """
+  id: ID!
+  """
+  Timestamp of exception
+  """
+  timestamp: String!
+  """
+  The source IP address of the exception
+  """
+  srcIP: String!
+  """
+  The topic of the exception
+  """
+  topic: String!
+  """
+  The type of exception
+  """
+  mqttType: MQTTType!
+}
+enum MQTTType {
+  Publish
+  Subscribe
 }
