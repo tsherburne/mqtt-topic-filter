@@ -8,6 +8,7 @@ from ariadne import ObjectType, SubscriptionType, make_executable_schema, load_s
 from ariadne.asgi import GraphQL
 import uvicorn
 import threading
+import pyroute2
 
 # save boottime
 global bootTime
@@ -25,46 +26,67 @@ policyExceptionResponse = {}
 policyExceptionResponse['status'] = status
 policyExceptionResponse['policyExceptions'] = []
 
-global policyException, exceptionReceived
+global policyException, exceptionReceived, exceptionCount
 policyException = {}
 exceptionReceived = False
+exceptionCount = 0
+
+# create dicionary (ip, topic) -> 'index' within policyExceptions list
+global exceptionIndex
+exceptionIndex = {}
+
 
 # callback for bpf perf_buffer
-def logPolicyException(cpu, data, size):
-    global policyException, exceptionReceived, bootTime
+def notifyPolicyException(cpu, data, size):
+    global policyException, exceptionReceived, bootTime, exceptionCount, exceptionIndex
     receivedException = {}
-    exception = bpf["exceptions"].event(data)
-    exceptionTime = datetime.fromtimestamp(int((exception.ts/1000000000) + bootTime))
+    exception = bpf["notifications"].event(data)
+    exceptionTime = datetime.fromtimestamp(int((exception.initial_ts/1000000000) + bootTime))
     receivedException['id'] = str(uuid.uuid1())
-    receivedException['timestamp'] = str(exceptionTime)
+    receivedException['initialTimestamp'] = str(exceptionTime)
+    receivedException['latestTimestamp'] = str(exceptionTime)
+    receivedException['count'] = 1
     receivedException['srcIP'] = str(ipaddress.ip_address(exception.src_ip))
     receivedException['topic'] = str(exception.topic.decode())
     if exception.mqtt_type == 3:
-        receivedException['mqttType'] = 'Publish'
-    elif exception.mqtt_type == 8:
-        receivedException['mqttType'] = 'Subscribe'
+        receivedException['pubException'] = True
     else:
-        receivedException['mqttType'] = 'None'
-
-    policyExceptionResponse['policyExceptions'].append(receivedException)
+        receivedException['pubException'] = False
+    if exception.mqtt_type == 8:
+        receivedException['subException'] = True
+    else:
+        receivedException['subException'] = False
 
     policyException = receivedException
+    policyExceptionResponse['policyExceptions'].append(receivedException)
+ 
+    # create dictionary to track index within policyExceptions
+    exceptionIndex[(exception.src_ip, exception.topic)] = exceptionCount
+    exceptionCount += 1
+
     exceptionReceived = True
 
  # initialize BPF - load source code
 bpf = BPF(src_file="mqtt-topic-filter.c")
-# load eBPF function of type SOCKET_FILTER into the kernel
-mqtt_filter_function = bpf.load_func("mqtt_filter", BPF.SOCKET_FILTER)
-# create a RAW socket and attach eBPF function
-BPF.attach_raw_socket(mqtt_filter_function, "eth0")
-BPF.attach_raw_socket(mqtt_filter_function, "lo")
+# load eBPF function of type BPF.SCHED_CLS into the kernel
+mqtt_filter_function = bpf.load_func("mqtt_filter", BPF.SCHED_CLS)
 
 # attach to allowed topics table
 allowed_topics = bpf.get_table("allowed_topics")
+# attach to policy exceptions table
+exceptions = bpf.get_table("exceptions")
 # attach callback for exceptions perf buffer
-bpf["exceptions"].open_perf_buffer(logPolicyException)
+bpf["notifications"].open_perf_buffer(notifyPolicyException)
+# setup ingress TC filter
+ip = pyroute2.IPRoute()
+ipdb = pyroute2.IPDB(nl=ip)
+idx = ipdb.interfaces["eth0"].index
+ip.tc("add", "clsact", idx)
+ip.tc("add-filter", "bpf", idx, ":1", fd=mqtt_filter_function.fd, 
+        name=mqtt_filter_function.name, parent="ffff:fff2", classid=1, 
+        direct_action=True)
 
-# load attached topics from json file
+# load attached topic filter policy from json file
 with open('./mqtt-topic-filter.json', 'r+') as fp:
     topicFilters = json.load(fp)
     fp.close()
@@ -76,7 +98,7 @@ for topic in topicFilters['data']['topicFilters']:
             topic['allowPub'], \
             topic['pubRate'])
 
-# store topic filter list
+# store topic filter policy list
 topicFilterList = topicFilters['data']['topicFilters']
 mqttFilterResponse['topicFilters'] = topicFilterList
 
@@ -96,6 +118,29 @@ def resolve_mqttTopicFilterQuery(obj, info):
 
 @query.field("mqttPolicyExceptionQuery")
 def resolve_mqttPolicyExceptionQuery(obj, info):
+    global exceptionIndex, bootTime
+    # update latestTimestamp, count, subException, pubException
+    for k, v in exceptions.items():
+        exceptionTime = datetime.fromtimestamp(int((v.latest_ts/1000000000) + bootTime))
+
+        policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+            ['latestTimestamp'] = str(exceptionTime)
+        policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+            ['count'] = v.count
+
+        if v.pub_exception == 1:
+            policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+                ['pubException'] = True
+        else:
+            policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+                ['pubException'] = False
+        if v.sub_exception == 1:
+            policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+                ['subException'] = True
+        else:
+            policyExceptionResponse['policyExceptions'][exceptionIndex[(k.src_ip, k.topic)]] \
+                ['subException'] = False
+
     return policyExceptionResponse
 
 # setup Subscription resolvers
@@ -123,7 +168,8 @@ async def policyException_generator(obj, info):
 
 def pollBuffer():
     while 1:
-        # logPolicyException() callback happens before perf_buffer_poll() returns
+        # notifyPolicyException() callback happens before perf_buffer_poll() returns
+        #    poll() is blocking
         bpf.perf_buffer_poll()
 
 # setup daemon thread to handle perf buffer polling and callback
@@ -138,4 +184,9 @@ app = GraphQL(schema, debug=True)
 
 # start uvicorn ASGI server
 uvicorn.run(app, host="192.168.7.67", lifespan="off", port=8000, log_level="debug")
+
+# cleanup TC Filter
+ip.tc("del", "clsact", idx)
+ipdb.release()
+
 sys.exit(0)

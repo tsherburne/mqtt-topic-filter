@@ -1,33 +1,52 @@
 #include <net/sock.h>
 #include <bcc/proto.h>
 
+// TC_ACT_OK (0), will terminate the packet processing pipeline and
+//           allows the packet to proceed
+// TC_ACT_SHOT (2), will terminate the packet processing pipeline
+//           and drops the packet
+
 #define IP_TCP 6
 #define ETH_HLEN 14
-#define MAX_TOPIC_LEN 127
+#define MAX_TOPIC_LEN 256
 
 #define MQTT_PUB 3
 #define MQTT_SUB 8
 
+// allowed ip / topic pairs
 struct Key {
     u32   src_ip;
     char  topic[MAX_TOPIC_LEN + 1];
 };
-struct Leaf {
+struct Policy {
     int   allow_sub;
     int   allow_pub;
     int   rate;
 };
-// allowed ip / topic pairs
-BPF_HASH(allowed_topics, struct Key, struct Leaf, 256);
+BPF_HASH(allowed_topics, struct Key, struct Policy, 256);
 
+// mqtt topic exceptions
 struct Exception {
-    u64     ts;
+    u64     initial_ts;
+    u64     latest_ts;
+    u32     count;
+    int     sub_exception;
+    int     pub_exception;
+};
+BPF_HASH(exceptions, struct Key, struct Exception, 256);
+
+// mqtt initial notification of exception
+struct Notification {
+    u64     initial_ts;
     u32     src_ip;
     u32     mqtt_type;
     char    topic[MAX_TOPIC_LEN + 1];
 };
-// mqtt topic exceptions
-BPF_PERF_OUTPUT(exceptions);
+BPF_PERF_OUTPUT(notifications);
+
+// mqtt current topic / notification - processed off stack
+BPF_ARRAY(current_topic, struct Key, 1);
+BPF_ARRAY(current_notification, struct Notification, 1);
 
 int mqtt_filter(struct __sk_buff *skb) {
     u8 *cursor = 0;
@@ -35,16 +54,16 @@ int mqtt_filter(struct __sk_buff *skb) {
     u8 packet_type = skb->pkt_type;
     // filter packets not for 'us'
     if (packet_type != 0) {
-        return -1;
+        return TC_ACT_OK;
     }
-    // filter IPv4 (0x0800 ethertype) 
+    // filter IPv4 (0x0800 ethertype)
     if (ethernet->type != 0x0800) {
-        return -1;
+        return TC_ACT_OK;
     }
     struct ip_t *ip = cursor_advance(cursor, sizeof(*ip));
     // filter TCP packets (0x06 ipv4)
     if (ip->nextp != IP_TCP) {
-        return -1;
+        return TC_ACT_OK;
     }
     u32  ip_header_length = 0;
     ip_header_length = ip->hlen << 2;
@@ -54,7 +73,7 @@ int mqtt_filter(struct __sk_buff *skb) {
 
     // filter mqtt packets
     if (tcp->dst_port != 1883) {
-        return -1;
+        return TC_ACT_OK;
     }
 
     u32  tcp_header_length = 0;
@@ -101,40 +120,66 @@ int mqtt_filter(struct __sk_buff *skb) {
         mqtt_topic_len = (mqtt_topic_len_msb << 8) + mqtt_topic_len_lsb;
         mqtt_payload_len = mqtt_packet_length - 1 - mqtt_length_size - mqtt_topic_len;
 
-        // initialized lookup key
-        struct Key key;
-        __builtin_memset(&key, 0, sizeof(key));
-        key.src_ip = ip->src;
-        //char mqtt_topic[MAX_TOPIC_LEN + 1];
-        if (mqtt_topic_len > 0 && mqtt_topic_len <= MAX_TOPIC_LEN) {
-            // fetch topic
-            u16 i = 0;
-            for (i = 0; i < MAX_TOPIC_LEN; i++) {
-                key.topic[i] = load_byte(skb, payload_index + i);
-                if (i >= mqtt_topic_len) {
-                    break;
+        // off stack storage for current topic
+        int zero = 0;
+        struct Key *key = current_topic.lookup(&zero);
+        if (key != NULL) {
+            __builtin_memset(key, 0, sizeof(*key));
+            key->src_ip = ip->src;
+
+            if (mqtt_topic_len > 0 && mqtt_topic_len <= MAX_TOPIC_LEN) {
+                // fetch topic
+                u16 i = 0;
+                for (i = 0; i < MAX_TOPIC_LEN; i++) {
+                    key->topic[i] = load_byte(skb, payload_index + i);
+                    if (i >= mqtt_topic_len - 1) {
+                        break;
+                    }
+                }
+                // check if publish is allowed
+                struct Policy *policy;
+                policy = allowed_topics.lookup(key);
+                if (policy == NULL || policy->allow_pub == 0) {
+                    // update exceptions
+                    struct Exception *exception;
+                    exception = exceptions.lookup(key);
+                    if (exception == NULL) {
+                        // first time exception
+                        struct Exception new_exception = {};
+                        __builtin_memset(&new_exception, 0, sizeof(new_exception));
+                        new_exception.initial_ts = bpf_ktime_get_ns();
+                        new_exception.latest_ts = bpf_ktime_get_ns();
+                        new_exception.count = 1;
+                        new_exception.pub_exception = 1;
+                        exceptions.update(key, &new_exception);
+                        // submit a notification using off stack storage
+                        int zero = 0;
+                        struct Notification *notification = current_notification.lookup(&zero);
+                        if (notification != NULL) {
+                            __builtin_memset(notification, 0, sizeof(*notification));
+                            notification->initial_ts = bpf_ktime_get_ns();
+                            notification->src_ip = ip->src;
+                            notification->mqtt_type = MQTT_PUB;
+                            __builtin_memcpy(notification->topic, key->topic, sizeof(notification->topic));
+                            notifications.perf_submit(skb, notification, sizeof(*notification));
+                        }
+                    }
+                    else {
+                        // update exception timestamp and count
+                        exception->latest_ts = bpf_ktime_get_ns();
+                        exception->count += 1;
+                        exception->pub_exception = 1;
+                    }
+
+                    return TC_ACT_SHOT;
                 }
             }
-
-            // check if publish is allowed
-            struct Leaf *leaf;
-            leaf = allowed_topics.lookup(&key);
-            if (leaf == NULL || leaf->allow_pub == 0) {
-                // submit an exception
-                struct Exception exception = {};
-                __builtin_memset(&exception, 0, sizeof(exception));
-                exception.ts = bpf_ktime_get_ns();
-                exception.src_ip = ip->src;
-                exception.mqtt_type = MQTT_PUB;
-                __builtin_memcpy(&exception.topic, key.topic, sizeof(exception.topic));
-                exceptions.perf_submit(skb, &exception, sizeof(exception));
+            else
+            {
+                bpf_trace_printk("Invalid Topic Len: %d\n", mqtt_topic_len);
+                return TC_ACT_SHOT;
             }
         }
-        else
-        {
-            bpf_trace_printk("Invalid Topic Len: %d\n", mqtt_topic_len);
-        }
-    }  
-    // drop the packet
-    return -1;
+    }
+    return TC_ACT_OK;
 }

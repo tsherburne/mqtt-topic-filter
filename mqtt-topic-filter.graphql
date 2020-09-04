@@ -75,9 +75,17 @@ type PolicyException {
   """
   id: ID!
   """
-  Timestamp of exception
+  Timestamp of initial exception
   """
-  timestamp: String!
+  initialTimestamp: String!
+  """
+  Timestamp of most recent exception
+  """
+  latestTimestamp: String!
+  """
+  Number of exceptions
+  """
+  count: Int!
   """
   The source IP address of the exception
   """
@@ -87,9 +95,13 @@ type PolicyException {
   """
   topic: String!
   """
-  The type of exception
+  Pub exception encountered
   """
-  mqttType: MQTTType!
+  pubException: Boolean!
+  """
+  Sub exception encountered
+  """
+  subException: Boolean!
 }
 enum MQTTType {
   None
